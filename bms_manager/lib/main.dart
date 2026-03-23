@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:convert';
+// import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -59,6 +59,8 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
     [0xDD, 0xA5, 0x05, 0x00, 0xFF, 0xFB, 0x77],
     // Daly Generic 0x90 (Volt/Curr/SOC)
     [0xA5, 0x40, 0x90, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7D],
+    // Daly Generic 0x93 (Charge/Discharge Status, Capacity)
+    [0xA5, 0x40, 0x93, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80],
   ];
 
   final List<ScanResult> _scanResults = [];
@@ -412,7 +414,7 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
       return;
     }
 
-    final metrics = BmsDecoder.decode(raw);
+    final metrics = BmsDecoder.decode(raw, _metrics);
     setState(() {
       if (metrics != null) {
         _packetCount++;
@@ -734,6 +736,8 @@ class _MetricsPanel extends StatelessWidget {
             Row(
               children: [
                 Expanded(child: _metricTile(context, 'Power', metrics?.wattageString ?? '-- W', Icons.electric_meter, valueStyle)),
+                const SizedBox(width: 12),
+                Expanded(child: _metricTile(context, 'Capacity', metrics?.capacityString ?? '-- Ah', Icons.battery_charging_full, valueStyle)),
               ],
             ),
             if (metrics != null) ...[
@@ -784,6 +788,8 @@ class BmsMetrics {
     required this.batteryPercent,
     required this.voltage,
     required this.current,
+    this.totalCapacityAh,
+    this.remainingCapacityAh,
     required this.timestamp,
     required this.parserHint,
   });
@@ -791,6 +797,8 @@ class BmsMetrics {
   final double batteryPercent;
   final double voltage;
   final double current;
+  final double? totalCapacityAh;
+  final double? remainingCapacityAh;
   final DateTime timestamp;
   final String parserHint;
 
@@ -800,26 +808,51 @@ class BmsMetrics {
   String get voltageString => '${voltage.toStringAsFixed(2)} V';
   String get currentString => '${current.toStringAsFixed(2)} A';
   String get wattageString => '${wattage.toStringAsFixed(1)} W';
+  String get capacityString => totalCapacityAh != null ? '${totalCapacityAh!.toStringAsFixed(1)} Ah' : '-- Ah';
+
+  BmsMetrics copyWith({
+    double? batteryPercent,
+    double? voltage,
+    double? current,
+    double? totalCapacityAh,
+    double? remainingCapacityAh,
+    DateTime? timestamp,
+    String? parserHint,
+  }) {
+    return BmsMetrics(
+      batteryPercent: batteryPercent ?? this.batteryPercent,
+      voltage: voltage ?? this.voltage,
+      current: current ?? this.current,
+      totalCapacityAh: totalCapacityAh ?? this.totalCapacityAh,
+      remainingCapacityAh: remainingCapacityAh ?? this.remainingCapacityAh,
+      timestamp: timestamp ?? this.timestamp,
+      parserHint: parserHint ?? this.parserHint,
+    );
+  }
 }
 
 class BmsDecoder {
-  static BmsMetrics? decode(List<int> raw) {
-    final jbd = _parseJbdBasicInfo(raw);
+  static BmsMetrics? decode(List<int> raw, [BmsMetrics? currentMetrics]) {
+    if (raw.isEmpty) {
+      return null;
+    }
+
+    final jbd = _parseJbdBasicInfo(raw, currentMetrics);
     if (jbd != null) {
       return jbd;
     }
 
-    final ascii = _parseAsciiPayload(raw);
+    final ascii = _parseAsciiPayload(raw, currentMetrics);
     if (ascii != null) {
       return ascii;
     }
 
-    final daly = _parseDalyLikePayload(raw);
+    final daly = _parseDalyLikePayload(raw, currentMetrics);
     if (daly != null) {
       return daly;
     }
 
-    final generic = _parseGenericFrame(raw);
+    final generic = _parseGenericFrame(raw, currentMetrics);
     if (generic != null) {
       return generic;
     }
@@ -827,7 +860,7 @@ class BmsDecoder {
     return null;
   }
 
-  static BmsMetrics? _parseJbdBasicInfo(List<int> raw) {
+  static BmsMetrics? _parseJbdBasicInfo(List<int> raw, [BmsMetrics? currentMetrics]) {
     if (raw.length < 7 || raw[0] != 0xDD || raw[1] != 0x03) {
       return null;
     }
@@ -866,17 +899,15 @@ class BmsDecoder {
       batteryPercent: soc,
       voltage: voltage,
       current: current,
+      totalCapacityAh: nominalCapacityRaw / 100.0,
+      remainingCapacityAh: remainingCapacityRaw / 100.0,
       timestamp: DateTime.now(),
-      parserHint: 'JBD basic info frame',
+      parserHint: 'JBD/Xiaoxiang BMS',
     );
   }
 
-  static BmsMetrics? _parseAsciiPayload(List<int> raw) {
-    final text = utf8.decode(raw, allowMalformed: true).trim();
-    if (text.isEmpty) {
-      return null;
-    }
-
+  static BmsMetrics? _parseAsciiPayload(List<int> raw, [BmsMetrics? currentMetrics]) {
+    final text = String.fromCharCodes(raw);
     final keyValueRegex = RegExp(r'(soc|battery|v|volt|a|amp|current)\s*[:=]\s*(-?\d+(?:\.\d+)?)',
         caseSensitive: false);
     final matches = keyValueRegex.allMatches(text);
@@ -918,37 +949,80 @@ class BmsDecoder {
     );
   }
 
-  static BmsMetrics? _parseDalyLikePayload(List<int> raw) {
-    // Basic Daly Frame check: Start Mark A5, Module Address 01, Command 90, Data Len 08 (13 bytes total)
-    if (raw.length < 13 || raw[0] != 0xA5 || raw[1] != 0x01 || raw[2] != 0x90) {
+  static BmsMetrics? _parseDalyLikePayload(List<int> raw, [BmsMetrics? currentMetrics]) {
+    // Basic Daly Frame check: Start Mark A5, Module Address 01...
+    if (raw.length < 13 || raw[0] != 0xA5 || raw[1] != 0x01) {
       return null;
     }
 
-    final bytes = Uint8List.fromList(raw);
-    final byteData = ByteData.sublistView(bytes);
+    final command = raw[2];
 
-    final voltageRaw = byteData.getUint16(4, Endian.big);
-    final currentRaw = byteData.getUint16(8, Endian.big);
-    final socRaw = byteData.getUint16(10, Endian.big);
+    if (command == 0x90) {
+      final bytes = Uint8List.fromList(raw);
+      final byteData = ByteData.sublistView(bytes);
 
-    final voltage = voltageRaw / 10.0;
-    final current = (currentRaw - 30000) / 10.0; // Offset 30000 -> 0A
-    final soc = socRaw / 10.0;
+      final voltageRaw = byteData.getUint16(4, Endian.big);
+      final currentRaw = byteData.getUint16(8, Endian.big);
+      final socRaw = byteData.getUint16(10, Endian.big);
 
-    if (soc < 0 || soc > 100 || voltage <= 0) {
-      return null;
+      final voltage = voltageRaw / 10.0;
+      final current = (currentRaw - 30000) / 10.0; // Offset 30000 -> 0A
+      final soc = socRaw / 10.0;
+
+      if (soc < 0 || soc > 100 || voltage <= 0) {
+        return null;
+      }
+
+      if (currentMetrics != null) {
+        return currentMetrics.copyWith(
+          batteryPercent: soc,
+          voltage: voltage,
+          current: current,
+          timestamp: DateTime.now(),
+          parserHint: 'Daly BMS frame 0x90',
+        );
+      }
+
+      return BmsMetrics(
+        batteryPercent: soc,
+        voltage: voltage,
+        current: current,
+        timestamp: DateTime.now(),
+        parserHint: 'Daly BMS frame 0x90',
+      );
+    } else if (command == 0x93) {
+      final bytes = Uint8List.fromList(raw);
+      final byteData = ByteData.sublistView(bytes);
+      // Byte 4: status, Byte 5: charge MOS, Byte 6: discharge MOS, Byte 7: BMS life
+      // Bytes 8-11 (indices 8,9,10,11): Residual Capacity
+      final residualCapacityMah = byteData.getUint32(8, Endian.big);
+      final capacityAh = residualCapacityMah / 1000.0;
+
+      if (currentMetrics != null) {
+        return currentMetrics.copyWith(
+          remainingCapacityAh: capacityAh,
+          totalCapacityAh: currentMetrics.batteryPercent > 0 ? (capacityAh / (currentMetrics.batteryPercent / 100.0)) : null,
+          timestamp: DateTime.now(),
+          parserHint: 'Daly BMS frame 0x93',
+        );
+      } else {
+        return BmsMetrics(
+          batteryPercent: 0.0,
+          voltage: 0.0,
+          current: 0.0,
+          remainingCapacityAh: capacityAh,
+          timestamp: DateTime.now(),
+          parserHint: 'Daly BMS frame 0x93',
+        );
+      }
+    } else if (command == 0x50) {
+      // Setup typical 0x50 frame parsing if needed
     }
 
-    return BmsMetrics(
-      batteryPercent: soc,
-      voltage: voltage,
-      current: current,
-      timestamp: DateTime.now(),
-      parserHint: 'Daly BMS frame 0x90',
-    );
+    return null;
   }
 
-  static BmsMetrics? _parseGenericFrame(List<int> raw) {
+  static BmsMetrics? _parseGenericFrame(List<int> raw, [BmsMetrics? currentMetrics]) {
     if (raw.length < 5) {
       return null;
     }
