@@ -796,7 +796,7 @@ class _MetricsPanel extends StatelessWidget {
               children: [
                 Expanded(child: _metricTile(context, 'Energy', metrics?.energyString ?? '-- Wh', Icons.battery_charging_full_rounded, valueStyle)),
                 const SizedBox(width: 12),
-                Expanded(child: _metricTile(context, 'Est. Range', metrics?.rangeString ?? '-- km', Icons.map_outlined, valueStyle)),
+                Expanded(child: _metricTile(context, 'Real Range', metrics?.realtimeRangeString(speedKmh) ?? '-- km', Icons.map_outlined, valueStyle)),
               ],
             ),
             const SizedBox(height: 12),
@@ -902,6 +902,31 @@ class BmsMetrics {
 
   String get rangeString => estimatedRangeKm != null ? '${estimatedRangeKm!.toStringAsFixed(1)} km' : '-- km';
   String get energyString => remainingWh != null ? '${remainingWh!.toStringAsFixed(0)} Wh' : '-- Wh';
+
+  String realtimeRangeString(double speedKmh) {
+    if (remainingWh == null) return '-- km';
+    
+    // If not moving or not consuming power, fallback to static estimation
+    if (speedKmh < 2.0 || wattage <= 0.0) {
+      return estimatedRangeKm != null ? '${estimatedRangeKm!.toStringAsFixed(1)} km (est)' : '-- km';
+    }
+
+    // Power (W) / Speed (km/h) = Efficiency (Wh/km)
+    double efficiencyWhPerKm = wattage / speedKmh;
+    
+    // Prevent mathematically impossible numbers from tiny power values
+    if (efficiencyWhPerKm < 3.0) {
+      efficiencyWhPerKm = 3.0;
+    }
+
+    final realRange = remainingWh! / efficiencyWhPerKm;
+
+    if (realRange > 500) {
+      return '> 500 km (real)';
+    }
+
+    return '${realRange.toStringAsFixed(1)} km (real)';
+  }
 
   BmsMetrics copyWith({
     double? batteryPercent,
