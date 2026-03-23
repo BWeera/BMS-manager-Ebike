@@ -755,6 +755,14 @@ class _MetricsPanel extends StatelessWidget {
                 Expanded(child: _metricTile(context, 'Health', metrics?.healthString ?? '-- %', Icons.health_and_safety_outlined, valueStyle)),
               ],
             ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(child: _metricTile(context, 'Energy', metrics?.energyString ?? '-- Wh', Icons.battery_charging_full_rounded, valueStyle)),
+                const SizedBox(width: 12),
+                Expanded(child: _metricTile(context, 'Est. Range', metrics?.rangeString ?? '-- km', Icons.map_outlined, valueStyle)),
+              ],
+            ),
             if (metrics != null) ...[
               const SizedBox(height: 16),
               Divider(color: Theme.of(context).colorScheme.outlineVariant),
@@ -830,6 +838,26 @@ class BmsMetrics {
   String get capacityString => totalCapacityAh != null ? '${totalCapacityAh!.toStringAsFixed(1)} Ah' : '-- Ah';
   String get cyclesString => cycles != null ? '$cycles' : '--';
   String get healthString => healthPercent != null ? '${healthPercent!.toStringAsFixed(1)} %' : '-- %';
+
+  double? get remainingWh {
+    double? currentAh = remainingCapacityAh;
+    if (currentAh == null && totalCapacityAh != null) {
+      currentAh = totalCapacityAh! * (batteryPercent / 100.0);
+    }
+    if (currentAh == null || currentAh <= 0) return null;
+    return currentAh * voltage;
+  }
+
+  double? get estimatedRangeKm {
+    final wh = remainingWh;
+    if (wh == null) return null;
+    // Assume average e-bike efficiency to be roughly 20 Wh/km
+    const efficiencyWhPerKm = 20.0;
+    return wh / efficiencyWhPerKm;
+  }
+
+  String get rangeString => estimatedRangeKm != null ? '${estimatedRangeKm!.toStringAsFixed(1)} km' : '-- km';
+  String get energyString => remainingWh != null ? '${remainingWh!.toStringAsFixed(0)} Wh' : '-- Wh';
 
   BmsMetrics copyWith({
     double? batteryPercent,
