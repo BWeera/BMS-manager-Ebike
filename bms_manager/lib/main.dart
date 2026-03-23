@@ -1,11 +1,29 @@
 import 'dart:async';
-// import 'dart:convert';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+class BmsProfile {
+  final String id;
+  final String name;
+
+  BmsProfile({required this.id, required this.name});
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+      };
+
+  factory BmsProfile.fromJson(Map<String, dynamic> json) => BmsProfile(
+        id: json['id'] as String,
+        name: json['name'] as String,
+      );
+}
 
 final ValueNotifier<ThemeMode> themeNotifier = ValueNotifier(ThemeMode.system);
 
@@ -90,10 +108,109 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
   int _echoPacketCount = 0;
   bool _isScanning = false;
 
+  // Profile Management
+  List<BmsProfile> _savedProfiles = [];
+  String? _activeProfileId;
+  SharedPreferences? _prefs;
+
   @override
   void initState() {
     super.initState();
+    _initProfiles();
     _startLocationStream();
+  }
+
+  Future<void> _initProfiles() async {
+    _prefs = await SharedPreferences.getInstance();
+    await _loadProfiles();
+
+    if (_activeProfileId != null) {
+      _autoConnectToActiveProfile();
+    }
+  }
+
+  Future<void> _loadProfiles() async {
+    if (_prefs == null) return;
+    
+    final profilesJson = _prefs!.getStringList('bms_profiles') ?? [];
+    final activeId = _prefs!.getString('active_bms_profile_id');
+    
+    setState(() {
+      _savedProfiles = profilesJson
+          .map((jsonStr) => BmsProfile.fromJson(jsonDecode(jsonStr)))
+          .toList();
+      _activeProfileId = activeId;
+    });
+  }
+
+  Future<void> _saveProfiles() async {
+    if (_prefs == null) return;
+    
+    final profilesJson = _savedProfiles
+        .map((profile) => jsonEncode(profile.toJson()))
+        .toList();
+        
+    await _prefs!.setStringList('bms_profiles', profilesJson);
+    if (_activeProfileId != null) {
+      await _prefs!.setString('active_bms_profile_id', _activeProfileId!);
+    } else {
+      await _prefs!.remove('active_bms_profile_id');
+    }
+  }
+
+  Future<void> _setActiveProfile(String? id) async {
+    setState(() {
+      _activeProfileId = id;
+    });
+    await _saveProfiles();
+  }
+
+  Future<void> _addOrUpdateProfile(String id, String name) async {
+    final existingIndex = _savedProfiles.indexWhere((p) => p.id == id);
+    if (existingIndex >= 0) {
+      _savedProfiles[existingIndex] = BmsProfile(id: id, name: name);
+    } else {
+      _savedProfiles.add(BmsProfile(id: id, name: name));
+    }
+    setState(() {});
+    await _saveProfiles();
+  }
+
+  Future<void> _autoConnectToActiveProfile() async {
+    if (_activeProfileId == null) return;
+
+    await _ensureBluetoothPermissions();
+
+    setState(() {
+      _status = 'Searching for saved eBike...';
+      _isScanning = true;
+    });
+
+    _scanSubscription?.cancel();
+    _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
+      if (!mounted) return;
+      if (_connectedDevice != null) return; // already connected
+
+      try {
+        final targetResult = results.firstWhere(
+            (r) => r.device.remoteId.str == _activeProfileId);
+        
+        // Target found! Stop scan and connect
+        _stopScan();
+        _connect(targetResult);
+      } catch (e) {
+        // Not found in this batch
+      }
+    });
+
+    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
+    
+    if (mounted && _connectedDevice == null) {
+      setState(() {
+        _isScanning = false;
+        _status = 'Auto-connect failed. Please scan.';
+      });
+    }
   }
 
   void _startLocationStream() async {
@@ -540,12 +657,194 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
     return false;
   }
 
+  void _showProfileSwitcher() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setBottomSheetState) {
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 24.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('Saved eBikes', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 16),
+                    if (_savedProfiles.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.all(16.0),
+                        child: Text('No saved eBikes yet.'),
+                      )
+                    else
+                      ..._savedProfiles.map((p) => Card(
+                        margin: const EdgeInsets.only(bottom: 8.0),
+                        elevation: _activeProfileId == p.id ? 2 : 0,
+                        shape: RoundedRectangleBorder(
+                          side: BorderSide(
+                            color: _activeProfileId == p.id 
+                                ? Theme.of(context).colorScheme.primary 
+                                : Theme.of(context).colorScheme.outlineVariant,
+                            width: _activeProfileId == p.id ? 2 : 1,
+                          ),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: ListTile(
+                          leading: Icon(Icons.electric_bike, 
+                              color: _activeProfileId == p.id ? Theme.of(context).colorScheme.primary : null),
+                          title: Text(p.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text(p.id, style: const TextStyle(fontSize: 12)),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                                onPressed: () async {
+                                  final confirm = await showDialog<bool>(
+                                    context: context,
+                                    builder: (context) => AlertDialog(
+                                      title: const Text('Delete Profile'),
+                                      content: Text('Remove ${p.name}?'),
+                                      actions: [
+                                        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+                                        FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete')),
+                                      ],
+                                    ),
+                                  );
+                                  if (confirm == true) {
+                                    setBottomSheetState(() {
+                                      _savedProfiles.removeWhere((item) => item.id == p.id);
+                                      if (_activeProfileId == p.id) _activeProfileId = null;
+                                      _saveProfiles();
+                                    });
+                                    setState(() {});
+                                  }
+                                },
+                              ),
+                              if (_activeProfileId == p.id)
+                                const Icon(Icons.check_circle, color: Colors.green)
+                            ],
+                          ),
+                          onTap: () {
+                            _setActiveProfile(p.id);
+                            Navigator.pop(context);
+                            _autoConnectToActiveProfile();
+                          },
+                        ),
+                      )),
+                    const SizedBox(height: 24),
+                    if (_connectedDevice != null && !_savedProfiles.any((p) => p.id == _connectedDevice!.remoteId.str)) ...[
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(16)),
+                          icon: const Icon(Icons.save),
+                          label: const Text('Save Current Bike Profile'),
+                          onPressed: () {
+                            Navigator.pop(context);
+                            _promptSaveCurrentProfile();
+                          },
+                        ),
+                      ),
+                    ],
+                    if (_connectedDevice == null) ...[
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(padding: const EdgeInsets.all(16)),
+                          icon: const Icon(Icons.search),
+                          label: const Text('Manually Scan & Connect'),
+                          onPressed: () {
+                            Navigator.pop(context);
+                            _startScan();
+                          },
+                        ),
+                      ),
+                    ]
+                  ],
+                ),
+              ),
+            );
+          }
+        );
+      },
+    );
+  }
+
+  void _promptSaveCurrentProfile() {
+    if (_connectedDevice == null) return;
+    
+    final id = _connectedDevice!.remoteId.str;
+    String nameInput = _connectedDevice!.platformName.isNotEmpty 
+        ? _connectedDevice!.platformName 
+        : 'My eBike';
+        
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Name your eBike'),
+          content: TextField(
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: 'eBike Name',
+              border: OutlineInputBorder(),
+              hintText: 'e.g. Daily Commuter'
+            ),
+            controller: TextEditingController(text: nameInput),
+            onChanged: (val) => nameInput = val,
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel')
+            ),
+            FilledButton(
+              onPressed: () {
+                _addOrUpdateProfile(id, nameInput);
+                _setActiveProfile(id);
+                Navigator.pop(context);
+              },
+              child: const Text('Save Profile'),
+            )
+          ],
+        );
+      }
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    String currentTitle = 'eBike BMS';
+    if (_activeProfileId != null) {
+      try {
+        currentTitle = _savedProfiles.firstWhere((p) => p.id == _activeProfileId).name;
+      } catch (_) {}
+    }
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('BMS Dashboard'),
+        title: GestureDetector(
+          onTap: _showProfileSwitcher,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(currentTitle),
+              const SizedBox(width: 4),
+              const Icon(Icons.keyboard_arrow_down_rounded),
+            ],
+          ),
+        ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.directions_bike),
+            tooltip: 'Profiles',
+            onPressed: _showProfileSwitcher,
+          ),
           IconButton(
             icon: Icon(themeNotifier.value == ThemeMode.dark ? Icons.light_mode : Icons.dark_mode),
             onPressed: () {
@@ -766,7 +1065,93 @@ class _MetricsPanel extends StatelessWidget {
               padding: const EdgeInsets.only(top: 8.0, bottom: 24.0),
               child: _BatteryGauge(percentage: metrics?.batteryPercent ?? 0.0),
             ),
-            
+
+            // Prominent Speed & Range Visual
+            Container(
+              padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    Theme.of(context).colorScheme.primaryContainer,
+                    Theme.of(context).colorScheme.secondaryContainer,
+                  ],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(24),
+                boxShadow: [
+                  BoxShadow(
+                    color: Theme.of(context).colorScheme.shadow.withValues(alpha: 0.1),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: IntrinsicHeight(
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    // Speed Column
+                    Expanded(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.speed_rounded, size: 32, color: Theme.of(context).colorScheme.primary),
+                          const SizedBox(height: 8),
+                          Text(
+                            speedKmh.toStringAsFixed(1),
+                            style: Theme.of(context).textTheme.displaySmall?.copyWith(
+                              fontWeight: FontWeight.bold,
+                              color: Theme.of(context).colorScheme.onPrimaryContainer,
+                            ),
+                          ),
+                          Text(
+                            'km/h',
+                            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                              color: Theme.of(context).colorScheme.onPrimaryContainer.withValues(alpha: 0.8),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    
+                    VerticalDivider(
+                      color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.3),
+                      thickness: 2,
+                      width: 32,
+                    ),
+
+                    // Range Column
+                    Expanded(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.map_rounded, size: 32, color: Theme.of(context).colorScheme.secondary),
+                          const SizedBox(height: 8),
+                          Text(
+                            metrics?.realtimeRangeString(speedKmh).split(' ')[0] ?? '--',
+                            style: Theme.of(context).textTheme.displaySmall?.copyWith(
+                              fontWeight: FontWeight.bold,
+                              color: Theme.of(context).colorScheme.onSecondaryContainer,
+                            ),
+                          ),
+                          Text(
+                            metrics != null && metrics!.realtimeRangeString(speedKmh).contains('(real)') 
+                                ? 'km Range (Real)' 
+                                : 'km Range (Est)',
+                            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              color: Theme.of(context).colorScheme.onSecondaryContainer.withValues(alpha: 0.8),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+
             // Grid of other metrics
             Row(
               children: [
@@ -795,14 +1180,6 @@ class _MetricsPanel extends StatelessWidget {
             Row(
               children: [
                 Expanded(child: _metricTile(context, 'Energy', metrics?.energyString ?? '-- Wh', Icons.battery_charging_full_rounded, valueStyle)),
-                const SizedBox(width: 12),
-                Expanded(child: _metricTile(context, 'Real Range', metrics?.realtimeRangeString(speedKmh) ?? '-- km', Icons.map_outlined, valueStyle)),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(child: _metricTile(context, 'Speed', '${speedKmh.toStringAsFixed(1)} km/h', Icons.speed_outlined, valueStyle)),
                 const SizedBox(width: 12),
                 const Spacer(),
               ],
