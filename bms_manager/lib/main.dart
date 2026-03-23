@@ -61,6 +61,10 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
     [0xA5, 0x40, 0x90, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7D],
     // Daly Generic 0x93 (Charge/Discharge Status, Capacity)
     [0xA5, 0x40, 0x93, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80],
+    // Daly Generic 0x94 (Status, Temp sensors, Cycles)
+    [0xA5, 0x40, 0x94, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x81],
+    // Daly Generic 0x50 (Rated Capacity / Hardware Info)
+    [0xA5, 0x40, 0x50, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3D],
   ];
 
   final List<ScanResult> _scanResults = [];
@@ -358,6 +362,9 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
             }
           }
         }
+        // Very important: delay between sending commands so the BLE stack and BMS can keep up.
+        // Otherwise commands get dropped and telemetry sections appear blank for a long time.
+        await Future.delayed(const Duration(milliseconds: 250));
       }
     }
 
@@ -740,6 +747,14 @@ class _MetricsPanel extends StatelessWidget {
                 Expanded(child: _metricTile(context, 'Capacity', metrics?.capacityString ?? '-- Ah', Icons.battery_charging_full, valueStyle)),
               ],
             ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(child: _metricTile(context, 'Cycle Count', metrics?.cyclesString ?? '--', Icons.sync_rounded, valueStyle)),
+                const SizedBox(width: 12),
+                Expanded(child: _metricTile(context, 'Health', metrics?.healthString ?? '-- %', Icons.health_and_safety_outlined, valueStyle)),
+              ],
+            ),
             if (metrics != null) ...[
               const SizedBox(height: 16),
               Divider(color: Theme.of(context).colorScheme.outlineVariant),
@@ -790,6 +805,8 @@ class BmsMetrics {
     required this.current,
     this.totalCapacityAh,
     this.remainingCapacityAh,
+    this.cycles,
+    this.healthPercent,
     required this.timestamp,
     required this.parserHint,
   });
@@ -799,6 +816,8 @@ class BmsMetrics {
   final double current;
   final double? totalCapacityAh;
   final double? remainingCapacityAh;
+  final int? cycles;
+  final double? healthPercent;
   final DateTime timestamp;
   final String parserHint;
 
@@ -809,6 +828,8 @@ class BmsMetrics {
   String get currentString => '${current.toStringAsFixed(2)} A';
   String get wattageString => '${wattage.toStringAsFixed(1)} W';
   String get capacityString => totalCapacityAh != null ? '${totalCapacityAh!.toStringAsFixed(1)} Ah' : '-- Ah';
+  String get cyclesString => cycles != null ? '$cycles' : '--';
+  String get healthString => healthPercent != null ? '${healthPercent!.toStringAsFixed(1)} %' : '-- %';
 
   BmsMetrics copyWith({
     double? batteryPercent,
@@ -816,6 +837,8 @@ class BmsMetrics {
     double? current,
     double? totalCapacityAh,
     double? remainingCapacityAh,
+    int? cycles,
+    double? healthPercent,
     DateTime? timestamp,
     String? parserHint,
   }) {
@@ -825,6 +848,8 @@ class BmsMetrics {
       current: current ?? this.current,
       totalCapacityAh: totalCapacityAh ?? this.totalCapacityAh,
       remainingCapacityAh: remainingCapacityAh ?? this.remainingCapacityAh,
+      cycles: cycles ?? this.cycles,
+      healthPercent: healthPercent ?? this.healthPercent,
       timestamp: timestamp ?? this.timestamp,
       parserHint: parserHint ?? this.parserHint,
     );
@@ -891,6 +916,8 @@ class BmsDecoder {
     final soc = (socFromByte > 0 ? socFromByte : socFromCapacity)
         .clamp(0.0, 100.0);
 
+    final cycles = (payload[8] << 8) | payload[9];
+
     if (voltage <= 0 || voltage > 200) {
       return null;
     }
@@ -901,6 +928,8 @@ class BmsDecoder {
       current: current,
       totalCapacityAh: nominalCapacityRaw / 100.0,
       remainingCapacityAh: remainingCapacityRaw / 100.0,
+      cycles: cycles,
+      healthPercent: 100.0, // Specific SOH not usually transmitted in standard 0x03 frame
       timestamp: DateTime.now(),
       parserHint: 'JBD/Xiaoxiang BMS',
     );
@@ -987,6 +1016,7 @@ class BmsDecoder {
         batteryPercent: soc,
         voltage: voltage,
         current: current,
+        healthPercent: 100.0,
         timestamp: DateTime.now(),
         parserHint: 'Daly BMS frame 0x90',
       );
@@ -1011,19 +1041,52 @@ class BmsDecoder {
           voltage: 0.0,
           current: 0.0,
           remainingCapacityAh: capacityAh,
+          healthPercent: 100.0,
           timestamp: DateTime.now(),
           parserHint: 'Daly BMS frame 0x93',
         );
       }
+    } else if (command == 0x94) {
+      final bytes = Uint8List.fromList(raw);
+      final byteData = ByteData.sublistView(bytes);
+      // Byte 4: Num cells, Byte 5: Num temps, Byte 6: Charger, Byte 7: Load 
+      // Byte 8: DI/DO, Bytes 9-10: Cycles
+      final cycles = byteData.getUint16(9, Endian.big);
+
+      if (currentMetrics != null) {
+        return currentMetrics.copyWith(
+          cycles: cycles,
+          healthPercent: currentMetrics.healthPercent ?? 100.0,
+          timestamp: DateTime.now(),
+          parserHint: 'Daly BMS frame 0x94',
+        );
+      } else {
+        return BmsMetrics(
+          batteryPercent: 0.0,
+          voltage: 0.0,
+          current: 0.0,
+          cycles: cycles,
+          healthPercent: 100.0,
+          timestamp: DateTime.now(),
+          parserHint: 'Daly BMS frame 0x94',
+        );
+      }
     } else if (command == 0x50) {
-      // Setup typical 0x50 frame parsing if needed
+      // Hardware/Board Info frame (usually contains Rated Capacity)
+      // Just pinging it helps wake some Daly revisions.
     }
 
-    return null;
+    // If it's a Daly frame but an unhandled command (like 0x50), keep existing state so the UI doesn't visually reset/flicker.
+    return currentMetrics;
   }
 
   static BmsMetrics? _parseGenericFrame(List<int> raw, [BmsMetrics? currentMetrics]) {
     if (raw.length < 5) {
+      return null;
+    }
+    
+    // Prevent catching Daly frames that fell through as 'generic' 
+    if (raw[0] == 0xA5 && raw.length >= 13) {
       return null;
     }
 
