@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:geolocator/geolocator.dart';
 
 final ValueNotifier<ThemeMode> themeNotifier = ValueNotifier(ThemeMode.system);
 
@@ -72,6 +73,7 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
   StreamSubscription<List<ScanResult>>? _scanSubscription;
   final List<StreamSubscription<List<int>>> _notifySubscriptions = [];
   StreamSubscription<BluetoothConnectionState>? _connectionSubscription;
+  StreamSubscription<Position>? _positionSubscription;
   Timer? _pollTimer;
 
   BluetoothDevice? _connectedDevice;
@@ -79,6 +81,7 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
   final List<BluetoothCharacteristic> _writeCharacteristics = [];
   final List<BluetoothCharacteristic> _readCharacteristics = [];
   BmsMetrics? _metrics;
+  double _speedKmh = 0.0;
   String _status = 'Ready';
   String _lastPacketHex = '-';
   String _lastPacketSource = '-';
@@ -88,7 +91,39 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
   bool _isScanning = false;
 
   @override
+  void initState() {
+    super.initState();
+    _startLocationStream();
+  }
+
+  void _startLocationStream() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) return;
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) return;
+    }
+    if (permission == LocationPermission.deniedForever) return;
+
+    _positionSubscription = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 0,
+      ),
+    ).listen((Position position) {
+      if (!mounted) return;
+      setState(() {
+        // speed is returned in m/s. Convert to km/h
+        _speedKmh = (position.speed * 3.6).clamp(0.0, 999.0);
+      });
+    });
+  }
+
+  @override
   void dispose() {
+    _positionSubscription?.cancel();
     _scanSubscription?.cancel();
     _cancelNotifySubscriptions();
     _connectionSubscription?.cancel();
@@ -526,7 +561,7 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
                 children: [
-                  _MetricsPanel(metrics: _metrics),
+                  _MetricsPanel(metrics: _metrics, speedKmh: _speedKmh),
                   const SizedBox(height: 14),
                   Card(
                     child: Padding(
@@ -708,9 +743,10 @@ class _BatteryGauge extends StatelessWidget {
 }
 
 class _MetricsPanel extends StatelessWidget {
-  const _MetricsPanel({required this.metrics});
+  const _MetricsPanel({required this.metrics, required this.speedKmh});
 
   final BmsMetrics? metrics;
+  final double speedKmh;
 
   @override
   Widget build(BuildContext context) {
@@ -761,6 +797,14 @@ class _MetricsPanel extends StatelessWidget {
                 Expanded(child: _metricTile(context, 'Energy', metrics?.energyString ?? '-- Wh', Icons.battery_charging_full_rounded, valueStyle)),
                 const SizedBox(width: 12),
                 Expanded(child: _metricTile(context, 'Est. Range', metrics?.rangeString ?? '-- km', Icons.map_outlined, valueStyle)),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(child: _metricTile(context, 'Speed', '${speedKmh.toStringAsFixed(1)} km/h', Icons.speed_outlined, valueStyle)),
+                const SizedBox(width: 12),
+                const Spacer(),
               ],
             ),
             if (metrics != null) ...[
