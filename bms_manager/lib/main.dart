@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -179,7 +180,8 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
   Future<void> _autoConnectToActiveProfile() async {
     if (_activeProfileId == null) return;
 
-    await _ensureBluetoothPermissions();
+    if (!await _ensureBluetoothPermissions()) return;
+    if (!await _ensureBluetoothEnabled()) return;
 
     setState(() {
       _status = 'Searching for saved eBike...';
@@ -249,7 +251,7 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
     super.dispose();
   }
 
-  Future<void> _ensureBluetoothPermissions() async {
+  Future<bool> _ensureBluetoothPermissions() async {
     final statuses = await [
       Permission.bluetoothScan,
       Permission.bluetoothConnect,
@@ -263,11 +265,45 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
           content: Text('Bluetooth permissions are required to read BMS data.'),
         ),
       );
+      return false;
     }
+    return true;
+  }
+
+  Future<bool> _ensureBluetoothEnabled() async {
+    // Wait slightly to get current state
+    final state = await FlutterBluePlus.adapterState.first;
+    if (state != BluetoothAdapterState.on) {
+      if (Platform.isAndroid) {
+        try {
+          await FlutterBluePlus.turnOn();
+          // Give it a moment to turn on
+          await Future.delayed(const Duration(seconds: 1));
+          return true;
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Please enable Bluetooth to scan for eBikes.')),
+            );
+          }
+          return false;
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Please enable Bluetooth in your device settings.')),
+          );
+        }
+        return false;
+      }
+    }
+    return true;
   }
 
   Future<void> _startScan() async {
-    await _ensureBluetoothPermissions();
+    if (!await _ensureBluetoothPermissions()) return;
+    if (!await _ensureBluetoothEnabled()) return;
+    
     _scanResults.clear();
 
     _scanSubscription?.cancel();
