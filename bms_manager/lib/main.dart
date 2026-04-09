@@ -8,6 +8,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 class BmsProfile {
   final String id;
@@ -30,6 +31,7 @@ final ValueNotifier<ThemeMode> themeNotifier = ValueNotifier(ThemeMode.system);
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  WakelockPlus.enable();
   runApp(const BmsManagerApp());
 }
 
@@ -71,7 +73,7 @@ class BmsDashboardPage extends StatefulWidget {
   State<BmsDashboardPage> createState() => _BmsDashboardPageState();
 }
 
-class _BmsDashboardPageState extends State<BmsDashboardPage> {
+class _BmsDashboardPageState extends State<BmsDashboardPage> with WidgetsBindingObserver {
   static const List<List<int>> _pollCommands = <List<int>>[
     // JBD/Xiaoxiang Default
     [0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77],
@@ -117,8 +119,21 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initProfiles();
     _startLocationStream();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Re-trigger polling if connected to ensure data isn't stale after backgrounding
+      if (_connectedDevice != null && _writeCharacteristics.isNotEmpty) {
+        _startPolling();
+      } else if (_connectedDevice == null && _activeProfileId != null) {
+        _autoConnectToActiveProfile();
+      }
+    }
   }
 
   Future<void> _initProfiles() async {
@@ -242,6 +257,7 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _positionSubscription?.cancel();
     _scanSubscription?.cancel();
     _cancelNotifySubscriptions();
@@ -876,6 +892,22 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> {
           ),
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh Data',
+            onPressed: () {
+              if (_connectedDevice != null && _writeCharacteristics.isNotEmpty) {
+                _startPolling();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Refreshing BMS data...'), duration: Duration(seconds: 1)),
+                );
+              } else if (_activeProfileId != null) {
+                _autoConnectToActiveProfile();
+              } else {
+                _startScan();
+              }
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.directions_bike),
             tooltip: 'Profiles',

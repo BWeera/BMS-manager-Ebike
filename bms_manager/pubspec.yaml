@@ -39,6 +39,7 @@ dependencies:
   geolocator: ^14.0.2
   shared_preferences: ^2.5.4
   json_annotation: ^4.11.0
+  wakelock_plus: ^1.5.1
 
 dev_dependencies:
   flutter_test:
