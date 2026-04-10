@@ -45,7 +45,7 @@ class BmsManagerApp extends StatelessWidget {
       builder: (context, themeMode, _) {
         return MaterialApp(
           debugShowCheckedModeBanner: false,
-          title: 'eBike BMS',
+          title: 'Ebike Battery Manager',
           themeMode: themeMode,
           theme: ThemeData(
             colorScheme: ColorScheme.fromSeed(
@@ -871,7 +871,7 @@ class _BmsDashboardPageState extends State<BmsDashboardPage> with WidgetsBinding
 
   @override
   Widget build(BuildContext context) {
-    String currentTitle = 'eBike BMS';
+    String currentTitle = 'Ebike Battery Manager';
     if (_activeProfileId != null) {
       try {
         currentTitle = _savedProfiles.firstWhere((p) => p.id == _activeProfileId).name;
